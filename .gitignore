@@ -1,0 +1,38 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Rust
+target/
+**/target/
+
+# Java / Maven
+.mvn/
+*.class
+
+# Node / npm
+node_modules/
+npm-debug.log*
+*.tgz
+
+# Project runtime artifacts
+logs/
+.tmp_test_java_fixture_*/
+lesscoder-cli-*.tgz
+

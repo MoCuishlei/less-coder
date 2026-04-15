@@ -1,0 +1,22 @@
+{
+  "name": "@lesscoder/cli",
+  "version": "0.1.0",
+  "description": "LessCoder CLI wrapper for Code-Native Engine MVP",
+  "license": "UNLICENSED",
+  "bin": {
+    "lesscoder": "npm/lesscoder.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "lint": "node -e \"console.log('no lint configured')\"",
+    "test": "node -e \"console.log('no npm tests configured')\""
+  },
+  "keywords": [
+    "lesscoder",
+    "cli",
+    "ai",
+    "coding"
+  ]
+}

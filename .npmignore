@@ -1,0 +1,17 @@
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.tgz
+tests/
+fixtures/
+benchmarks/
+docs/
+engine/
+logs/
+WORKLOG/
+.github/
+.pytest_cache/
+.tmp_test_java_fixture_*/
+*.egg-info/
+PROJECT_GUIDE.md

@@ -1,0 +1,30 @@
+{
+  "language": "java",
+  "version": 1,
+  "tasks": [
+    {
+      "id": "java_name_service_blank",
+      "category": "input-validation",
+      "project_root": "fixtures/java-benchmarks/name-service-blank",
+      "target_file": "src/main/java/com/acme/NameService.java",
+      "expected_failing_test": "com.acme.NameServiceTest.shouldReturnUnknownForBlank",
+      "description": "Blank input should be treated as invalid and return UNKNOWN."
+    },
+    {
+      "id": "java_range_validator_boundary",
+      "category": "boundary-condition",
+      "project_root": "fixtures/java-benchmarks/range-validator",
+      "target_file": "src/main/java/com/acme/RangeValidator.java",
+      "expected_failing_test": "com.acme.RangeValidatorTest.shouldIncludeBoundaryValues",
+      "description": "Range check should include min/max boundaries."
+    },
+    {
+      "id": "java_order_total_empty",
+      "category": "aggregation",
+      "project_root": "fixtures/java-benchmarks/order-total",
+      "target_file": "src/main/java/com/acme/OrderTotalCalculator.java",
+      "expected_failing_test": "com.acme.OrderTotalCalculatorTest.shouldReturnZeroForEmptyOrder",
+      "description": "Empty order should not include any extra fee and should return zero."
+    }
+  ]
+}
