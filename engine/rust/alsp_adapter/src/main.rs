@@ -124,6 +124,14 @@ fn handle_request(req: RequestEnvelope) -> ResponseEnvelope {
 
 fn route_action(req: RequestEnvelope) -> ResponseEnvelope {
     match req.action.as_str() {
+        "system.warmup" => ok_response(
+            req,
+            json!({
+                "status": "ready",
+                "adapter": "alsp_adapter",
+                "message": "internal warmup completed"
+            }),
+        ),
         "repo.map" => {
             let root = extract_root_path(&req.payload).unwrap_or_else(|| ".".to_string());
             let root_path = PathBuf::from(&root);

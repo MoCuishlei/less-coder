@@ -41,10 +41,13 @@ pip install -e .
 ## 运行
 
 ```bash
+lesscoder warmup
 lesscoder server --host 127.0.0.1 --port 8787
 lesscoder run --project-root fixtures/java-sample
 lesscoder trace --trace-id <trace_id>
 ```
+
+说明：`lesscoder server` 启动前会自动执行内部 warmup。
 
 ## 快速验证
 

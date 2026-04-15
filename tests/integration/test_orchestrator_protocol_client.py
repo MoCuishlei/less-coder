@@ -5,9 +5,12 @@ from orchestrator.langgraph_orchestrator import LocalProtocolClient
 
 
 async def _run_mock_server():
+    seen_actions: list[str] = []
+
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         req_line = await reader.readline()
         req = json.loads(req_line.decode("utf-8"))
+        seen_actions.append(req["action"])
         resp = {
             "version": "v0",
             "request_id": req["request_id"],
@@ -25,12 +28,12 @@ async def _run_mock_server():
 
     server = await asyncio.start_server(handler, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    return server, port
+    return server, port, seen_actions
 
 
 def test_protocol_client_request_response():
     async def run_case():
-        server, port = await _run_mock_server()
+        server, port, seen_actions = await _run_mock_server()
         client = LocalProtocolClient(port=port)
         try:
             resp = await client.request(
@@ -42,6 +45,7 @@ def test_protocol_client_request_response():
             assert resp["status"] == "ok"
             assert resp["trace_id"] == "tr_test_001"
             assert resp["data"]["action"] == "symbol.lookup"
+            assert seen_actions == ["system.warmup", "symbol.lookup"]
         finally:
             server.close()
             await server.wait_closed()

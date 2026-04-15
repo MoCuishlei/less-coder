@@ -1,6 +1,8 @@
 import argparse
 import json
 import os
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 import uuid
@@ -46,8 +48,21 @@ def build_parser(prog: str = "task") -> argparse.ArgumentParser:
     server_parser.add_argument("--port", default=8787, type=int, dest="port")
     server_parser.add_argument(
         "--manifest-path",
-        default="engine/rust/alsp_adapter/Cargo.toml",
+        default=None,
         dest="manifest_path",
+    )
+
+    warmup_parser = sub.add_parser("warmup", help="preflight and warm build before server/MCP usage")
+    warmup_parser.add_argument(
+        "--manifest-path",
+        default=None,
+        dest="manifest_path",
+    )
+    warmup_parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        dest="skip_build",
+        help="only run environment checks without cargo build",
     )
     return parser
 
@@ -90,11 +105,30 @@ def main(argv: list[str] | None = None, prog: str = "task") -> int:
         addr = f"{args.host}:{args.port}"
         env = os.environ.copy()
         env["ALSP_ADAPTER_ADDR"] = addr
+        manifest_path = _resolve_manifest_path(args.manifest_path)
+        if manifest_path is None:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "message": (
+                            "alsp_adapter manifest not found. "
+                            "Please run from repository root or pass --manifest-path <absolute-path>."
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 2
+        warmup_result = _run_warmup(manifest_path=manifest_path, skip_build=False, env=env)
+        if warmup_result["status"] != "ok":
+            print(json.dumps(warmup_result, ensure_ascii=False))
+            return int(warmup_result.get("exit_code", 2))
         cmd = [
             "cargo",
             "run",
             "--manifest-path",
-            args.manifest_path,
+            str(manifest_path),
             "--bin",
             "alsp_adapter",
         ]
@@ -113,6 +147,16 @@ def main(argv: list[str] | None = None, prog: str = "task") -> int:
             )
             return 127
 
+    if args.command == "warmup":
+        manifest_path = _resolve_manifest_path(args.manifest_path)
+        result = _run_warmup(
+            manifest_path=manifest_path,
+            skip_build=bool(args.skip_build),
+            env=os.environ.copy(),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0 if result["status"] == "ok" else int(result.get("exit_code", 2))
+
     return 1
 
 
@@ -120,6 +164,103 @@ def asyncio_run(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+def _resolve_manifest_path(user_manifest_path: str | None) -> Path | None:
+    if user_manifest_path:
+        p = Path(user_manifest_path).expanduser().resolve()
+        return p if p.exists() else None
+
+    cwd_candidate = _find_manifest_from(Path.cwd())
+    if cwd_candidate:
+        return cwd_candidate
+
+    module_candidate = _find_manifest_from(Path(__file__).resolve().parents[2])
+    if module_candidate:
+        return module_candidate
+
+    env_root = os.environ.get("LESSCODER_HOME")
+    if env_root:
+        env_candidate = _find_manifest_from(Path(env_root).expanduser().resolve())
+        if env_candidate:
+            return env_candidate
+
+    return None
+
+
+def _find_manifest_from(start: Path) -> Path | None:
+    direct = (start / "engine" / "rust" / "alsp_adapter" / "Cargo.toml").resolve()
+    if direct.exists():
+        return direct
+
+    for parent in [start, *start.parents]:
+        candidate = (parent / "engine" / "rust" / "alsp_adapter" / "Cargo.toml").resolve()
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def _collect_runtime_checks(manifest_path: Path | None) -> dict[str, str | None]:
+    return {
+        "python": shutil.which("python") or shutil.which("py"),
+        "cargo": shutil.which("cargo"),
+        "java": shutil.which("java"),
+        "mvn": shutil.which("mvn"),
+        "manifest_path": str(manifest_path) if manifest_path else None,
+    }
+
+
+def _run_warmup(
+    manifest_path: Path | None, skip_build: bool, env: dict[str, str] | None = None
+) -> dict[str, object]:
+    checks = _collect_runtime_checks(manifest_path)
+    warnings: list[str] = []
+    if checks["java"] is None:
+        warnings.append("java not found in PATH; verify step may fail for Java projects")
+    if checks["mvn"] is None:
+        warnings.append("mvn not found in PATH; verify step may fail for Java projects")
+
+    if checks["cargo"] is None or manifest_path is None:
+        return {
+            "status": "error",
+            "message": "warmup failed: cargo or alsp_adapter manifest not found",
+            "checks": checks,
+            "build": {"skipped": bool(skip_build), "exit_code": 2},
+            "warnings": warnings,
+            "exit_code": 2,
+        }
+
+    build = {"skipped": bool(skip_build), "exit_code": 0}
+    if not skip_build:
+        cmd = [
+            "cargo",
+            "build",
+            "--manifest-path",
+            str(manifest_path),
+            "--bin",
+            "alsp_adapter",
+        ]
+        completed = subprocess.run(cmd, env=env, check=False)
+        build["exit_code"] = int(completed.returncode)
+        if completed.returncode != 0:
+            return {
+                "status": "error",
+                "message": "warmup build failed",
+                "checks": checks,
+                "build": build,
+                "warnings": warnings,
+                "exit_code": int(completed.returncode),
+            }
+
+    return {
+        "status": "ok",
+        "message": "warmup completed",
+        "checks": checks,
+        "build": build,
+        "warnings": warnings,
+        "exit_code": 0,
+    }
 
 
 if __name__ == "__main__":

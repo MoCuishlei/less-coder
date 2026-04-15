@@ -41,10 +41,13 @@ The npm package is a CLI wrapper that invokes the Python runtime.
 ## Run
 
 ```bash
+lesscoder warmup
 lesscoder server --host 127.0.0.1 --port 8787
 lesscoder run --project-root fixtures/java-sample
 lesscoder trace --trace-id <trace_id>
 ```
+
+`lesscoder server` performs internal warmup automatically before serving.
 
 ## Quick Validation
 

@@ -114,10 +114,13 @@ CLI 与服务入口（推荐）：
 
 ```powershell
 python -m clients.cli.lesscoder --help
+python -m clients.cli.lesscoder warmup
 python -m clients.cli.lesscoder server --host 127.0.0.1 --port 8787
 python -m clients.cli.lesscoder run --project-root fixtures/java-sample
 python -m clients.cli.lesscoder trace --trace-id <trace_id>
 ```
+
+备注：`server` 启动时会自动执行内部 warmup；`warmup` 命令可用于显式预检查与预编译。
 
 ## 8. 验收标准（当前版本）
 

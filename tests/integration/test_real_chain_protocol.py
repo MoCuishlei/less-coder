@@ -13,7 +13,9 @@ async def _mock_adapter_server():
         data = {}
         status = "ok"
         error = None
-        if action == "repo.map":
+        if action == "system.warmup":
+            data = {"status": "ready"}
+        elif action == "repo.map":
             data = {"files": 1}
         elif action in {"symbol.lookup", "symbol.lookup.static"}:
             data = {"symbol": "normalizeName", "line": 4}

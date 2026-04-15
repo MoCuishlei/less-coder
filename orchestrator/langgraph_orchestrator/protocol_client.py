@@ -16,8 +16,40 @@ class LocalProtocolClient:
     version: str = "v0"
     source: str = "orchestrator"
     target: str = "alsp_adapter"
+    _warmed_up: bool = False
 
     async def request(
+        self,
+        action: str,
+        payload: dict[str, Any],
+        trace_id: str,
+        timeout_ms: int = 30_000,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        if action != "system.warmup" and not self._warmed_up:
+            warmup_resp = await self._request_once(
+                action="system.warmup",
+                payload={},
+                trace_id=trace_id,
+                timeout_ms=timeout_ms,
+                session_id=session_id,
+            )
+            if warmup_resp.get("status") != "ok":
+                raise ProtocolClientError(f"adapter warmup failed: {warmup_resp}")
+            self._warmed_up = True
+
+        resp = await self._request_once(
+            action=action,
+            payload=payload,
+            trace_id=trace_id,
+            timeout_ms=timeout_ms,
+            session_id=session_id,
+        )
+        if action == "system.warmup" and resp.get("status") == "ok":
+            self._warmed_up = True
+        return resp
+
+    async def _request_once(
         self,
         action: str,
         payload: dict[str, Any],

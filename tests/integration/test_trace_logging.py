@@ -11,7 +11,18 @@ async def _mock_adapter_server():
         req = json.loads(req_line.decode("utf-8"))
         action = req["action"]
 
-        if action == "repo.map":
+        if action == "system.warmup":
+            resp = {
+                "version": "v0",
+                "request_id": req["request_id"],
+                "trace_id": req["trace_id"],
+                "status": "ok",
+                "data": {"status": "ready"},
+                "error": None,
+                "fallback_used": False,
+                "cost": {"duration_ms": 1},
+            }
+        elif action == "repo.map":
             resp = {
                 "version": "v0",
                 "request_id": req["request_id"],
