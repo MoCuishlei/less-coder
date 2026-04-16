@@ -85,7 +85,7 @@ tests/integration           # 集成与真实链路测试
 
 ```powershell
 pip install lesscoder
-npm i -g @lesscoder/cli
+npm i -g @civilization/lesscoder
 ```
 
 发布前（源码安装）：

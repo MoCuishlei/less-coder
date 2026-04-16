@@ -27,7 +27,7 @@ After package publish:
 
 ```bash
 pip install lesscoder
-npm i -g @lesscoder/cli
+npm i -g @civilization/lesscoder
 ```
 
 From source (development):
@@ -82,7 +82,7 @@ Example config (common `mcpServers` format):
   "mcpServers": {
     "lesscoder": {
       "command": "lesscoder",
-      "args": ["server", "--host", "127.0.0.1", "--port", "8787"]
+      "args": ["mcp", "--adapter-host", "127.0.0.1", "--adapter-port", "8787"]
     }
   }
 }
@@ -90,6 +90,7 @@ Example config (common `mcpServers` format):
 
 Notes:
 
+- `lesscoder mcp` is stdio MCP mode (for OpenCode / IDE MCP clients).
 - project activation is explicit via `system.warmup` payload (`project_root`/`path`).
 - If port `8787` is already occupied, change it in both server args and client settings.
 - Current adapter endpoint is `127.0.0.1:<port>` with local protocol v0.

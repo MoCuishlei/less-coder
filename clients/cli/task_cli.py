@@ -16,6 +16,7 @@ import tomllib
 
 from orchestrator.langgraph_orchestrator import run_real_chain
 from clients.cli.trace_query import query_trace
+from clients.cli.mcp_stdio import BridgeConfig, run_stdio_bridge
 
 
 def build_parser(prog: str = "task") -> argparse.ArgumentParser:
@@ -103,6 +104,11 @@ def build_parser(prog: str = "task") -> argparse.ArgumentParser:
         dest="tag",
         help="optional release tag to verify (e.g. v0.1.0)",
     )
+
+    mcp_parser = sub.add_parser("mcp", help="run stdio MCP bridge")
+    mcp_parser.add_argument("--adapter-host", default="127.0.0.1", dest="adapter_host")
+    mcp_parser.add_argument("--adapter-port", default=8787, type=int, dest="adapter_port")
+    mcp_parser.add_argument("--timeout-ms", default=30000, type=int, dest="timeout_ms")
     return parser
 
 
@@ -285,6 +291,15 @@ def main(argv: list[str] | None = None, prog: str = "task") -> int:
         )
         print(json.dumps(result, ensure_ascii=False))
         return 0 if result["status"] == "ok" else int(result.get("exit_code", 2))
+
+    if args.command == "mcp":
+        return run_stdio_bridge(
+            BridgeConfig(
+                adapter_host=args.adapter_host,
+                adapter_port=int(args.adapter_port),
+                timeout_ms=int(args.timeout_ms),
+            )
+        )
 
     return 1
 

@@ -27,7 +27,7 @@
 
 ```bash
 pip install lesscoder
-npm i -g @lesscoder/cli
+npm i -g @civilization/lesscoder
 ```
 
 源码开发安装：
