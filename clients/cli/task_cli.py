@@ -764,19 +764,61 @@ def _platform_tag() -> str:
 
 
 def _download_adapter_binary(target: Path) -> tuple[Path | None, dict[str, object]]:
-    repo = os.environ.get("LESSCODER_RELEASE_REPO", "MoCuishlei/less-coder")
+    env_repo = _normalize_release_repo(os.environ.get("LESSCODER_RELEASE_REPO", ""))
+    repo_candidates = [env_repo] if env_repo else ["civilization-os/less-coder", "MoCuishlei/less-coder"]
     version = _installed_version()
     tag = f"v{version}"
-    api = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "lesscoder-cli"}
-    req = urllib.request.Request(api, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            release = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        return None, {"status": "error", "stage": "release_lookup", "message": str(exc)}
-    except json.JSONDecodeError as exc:
-        return None, {"status": "error", "stage": "release_parse", "message": str(exc)}
+    release = None
+    used_repo = None
+    lookup_errors: list[dict[str, object]] = []
+    last_error: dict[str, object] | None = None
+    for repo in repo_candidates:
+        api = f"https://api.github.com/repos/{repo}/releases/tags/{tag}"
+        req = urllib.request.Request(api, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                release = json.loads(resp.read().decode("utf-8"))
+                used_repo = repo
+                break
+        except urllib.error.HTTPError as exc:
+            err = {
+                "status": "error",
+                "stage": "release_lookup",
+                "repo": repo,
+                "http_status": int(exc.code),
+                "message": str(exc),
+            }
+            lookup_errors.append(err)
+            last_error = err
+        except urllib.error.URLError as exc:
+            err = {"status": "error", "stage": "release_lookup", "repo": repo, "message": str(exc)}
+            lookup_errors.append(err)
+            last_error = err
+        except json.JSONDecodeError as exc:
+            err = {"status": "error", "stage": "release_parse", "repo": repo, "message": str(exc)}
+            lookup_errors.append(err)
+            last_error = err
+    if release is None or used_repo is None:
+        downloaded, fallback_meta = _download_adapter_binary_by_predictable_asset(
+            target=target,
+            repos=repo_candidates,
+            tag=tag,
+        )
+        if downloaded:
+            return downloaded, fallback_meta
+        return None, {
+            "status": "error",
+            "stage": "release_lookup",
+            "message": "release not found via GitHub API and direct asset fallback failed",
+            "errors": lookup_errors,
+            "fallback": fallback_meta,
+            "next_action": [
+                "ensure GitHub release assets exist for this tag",
+                "set LESSCODER_RELEASE_REPO=<owner/repo> if using a fork",
+                "or set LESSCODER_ADAPTER_BIN to a local adapter binary",
+            ],
+        }
 
     assets = release.get("assets", [])
     asset = _select_release_asset(assets)
@@ -796,7 +838,7 @@ def _download_adapter_binary(target: Path) -> tuple[Path | None, dict[str, objec
         with urllib.request.urlopen(url, timeout=60) as src, target.open("wb") as dst:
             dst.write(src.read())
     except urllib.error.URLError as exc:
-        return None, {"status": "error", "stage": "asset_download", "message": str(exc)}
+        return None, {"status": "error", "stage": "asset_download", "repo": used_repo, "message": str(exc)}
 
     actual_sha = _sha256_file(target)
     if expected_sha and actual_sha.lower() != expected_sha.lower():
@@ -817,11 +859,96 @@ def _download_adapter_binary(target: Path) -> tuple[Path | None, dict[str, objec
         target.chmod(0o755)
     return target, {
         "status": "ok",
-        "repo": repo,
+        "repo": used_repo,
         "tag": tag,
         "asset": asset.get("name"),
         "sha256": actual_sha,
         "manifest_verified": bool(expected_sha),
+    }
+
+
+def _normalize_release_repo(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        return ""
+    s = raw
+    if s.startswith("https://github.com/"):
+        s = s[len("https://github.com/") :]
+    elif s.startswith("http://github.com/"):
+        s = s[len("http://github.com/") :]
+    elif s.startswith("git@github.com:"):
+        s = s[len("git@github.com:") :]
+    s = s.strip("/")
+    if s.endswith(".git"):
+        s = s[:-4]
+    parts = [x for x in s.split("/") if x]
+    if len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"
+    return ""
+
+
+def _predicted_asset_candidates() -> list[str]:
+    if os.name == "nt":
+        return ["alsp_adapter_windows_x86_64.exe", "alsp_adapter.exe"]
+    if sys.platform == "darwin":
+        return ["alsp_adapter_macos_x86_64", "alsp_adapter"]
+    return ["alsp_adapter_linux_x86_64", "alsp_adapter"]
+
+
+def _download_adapter_binary_by_predictable_asset(
+    target: Path,
+    repos: list[str],
+    tag: str,
+) -> tuple[Path | None, dict[str, object]]:
+    attempts: list[dict[str, object]] = []
+    candidates = _predicted_asset_candidates()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    for repo in repos:
+        for asset_name in candidates:
+            url = f"https://github.com/{repo}/releases/download/{tag}/{asset_name}"
+            try:
+                with urllib.request.urlopen(url, timeout=60) as src, target.open("wb") as dst:
+                    dst.write(src.read())
+                if os.name != "nt":
+                    target.chmod(0o755)
+                return target, {
+                    "status": "ok",
+                    "stage": "asset_download_direct",
+                    "repo": repo,
+                    "tag": tag,
+                    "asset": asset_name,
+                    "url": url,
+                    "sha256": _sha256_file(target),
+                    "manifest_verified": False,
+                }
+            except urllib.error.HTTPError as exc:
+                attempts.append(
+                    {
+                        "repo": repo,
+                        "asset": asset_name,
+                        "url": url,
+                        "http_status": int(exc.code),
+                        "message": str(exc),
+                    }
+                )
+            except urllib.error.URLError as exc:
+                attempts.append(
+                    {
+                        "repo": repo,
+                        "asset": asset_name,
+                        "url": url,
+                        "message": str(exc),
+                    }
+                )
+    try:
+        target.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return None, {
+        "status": "error",
+        "stage": "asset_download_direct",
+        "message": "no predictable release asset could be downloaded",
+        "attempts": attempts,
     }
 
 

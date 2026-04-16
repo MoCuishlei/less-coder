@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import urllib.error
 
 from clients.cli import lesscoder
 import clients.cli.task_cli as task_cli
@@ -314,3 +315,56 @@ def test_lookup_asset_sha256_from_manifest():
         == "abc123"
     )
     assert task_cli._lookup_asset_sha256(manifest, "missing") is None
+
+
+def test_normalize_release_repo_accepts_git_and_http_forms():
+    assert (
+        task_cli._normalize_release_repo("git@github.com:civilization-os/less-coder.git")
+        == "civilization-os/less-coder"
+    )
+    assert (
+        task_cli._normalize_release_repo("https://github.com/civilization-os/less-coder")
+        == "civilization-os/less-coder"
+    )
+
+
+def test_download_adapter_falls_back_to_predictable_asset(monkeypatch, tmp_path):
+    target = tmp_path / "alsp_adapter.exe"
+
+    class _FakeResp:
+        def __init__(self, payload: bytes):
+            self._payload = payload
+
+        def read(self):
+            return self._payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    calls = {"api": 0, "asset": 0}
+
+    def fake_urlopen(req, timeout=0):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "api.github.com/repos/" in url:
+            calls["api"] += 1
+            raise urllib.error.HTTPError(url, 404, "Not Found", hdrs=None, fp=None)
+        if "/releases/download/" in url:
+            calls["asset"] += 1
+            return _FakeResp(b"adapter-binary")
+        raise AssertionError(f"unexpected URL: {url}")
+
+    monkeypatch.setattr(task_cli.importlib_metadata, "version", lambda _pkg: "0.1.5")
+    monkeypatch.setattr(task_cli, "_platform_tag", lambda: "windows")
+    monkeypatch.setattr(task_cli.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.delenv("LESSCODER_RELEASE_REPO", raising=False)
+
+    downloaded, meta = task_cli._download_adapter_binary(target)
+    assert downloaded == target
+    assert target.exists()
+    assert calls["api"] >= 1
+    assert calls["asset"] >= 1
+    assert meta["status"] == "ok"
+    assert meta["stage"] == "asset_download_direct"
