@@ -27,9 +27,14 @@ class LocalProtocolClient:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         if action != "system.warmup" and not self._warmed_up:
+            warmup_payload = self._build_warmup_payload(payload)
+            if warmup_payload is None:
+                raise ProtocolClientError(
+                    "warmup requires explicit project_root/path in caller payload"
+                )
             warmup_resp = await self._request_once(
                 action="system.warmup",
-                payload={},
+                payload=warmup_payload,
                 trace_id=trace_id,
                 timeout_ms=timeout_ms,
                 session_id=session_id,
@@ -48,6 +53,15 @@ class LocalProtocolClient:
         if action == "system.warmup" and resp.get("status") == "ok":
             self._warmed_up = True
         return resp
+
+    def _build_warmup_payload(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        project_root = payload.get("project_root")
+        if isinstance(project_root, str) and project_root.strip():
+            return {"project_root": project_root}
+        path = payload.get("path")
+        if isinstance(path, str) and path.strip():
+            return {"project_root": path}
+        return None
 
     async def _request_once(
         self,

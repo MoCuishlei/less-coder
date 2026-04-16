@@ -1,36 +1,47 @@
-# 发布流水线说明
+# Release Pipeline
 
-## 触发方式
+## Trigger
 
-- 自动触发：`push tag`，匹配 `v*`
-- 手动触发：GitHub Actions 页面 `Release` -> `Run workflow`
+- Auto: push tag matching `v*`
+- Manual: GitHub Actions `Release` workflow dispatch
 
-## 流水线行为
+## Recommended Pre-Tag Dry Run
 
-`release.yml` 会执行：
+Run this before creating tag:
 
-1. 运行集成测试（`pytest -q tests/integration`）
-2. 构建 Python 发布包（wheel + sdist）
-3. 打包 npm tarball
-4. 构建 Rust `alsp_adapter` 三平台二进制（Linux/Windows/macOS）
-5. 若为 tag 触发，自动创建 GitHub Release 并上传所有产物
-6. 若配置了密钥，发布到 PyPI 与 npm
+```bash
+lesscoder release-dry-run --project-root /abs/path/to/less-coder --tag v0.1.0
+```
 
-## 必要密钥（Repository Secrets）
+What it validates:
 
-- `PYPI_API_TOKEN`：用于发布 Python 包
-- `NPM_TOKEN`：用于发布 npm 包
+- Python and npm versions are aligned (`pyproject.toml` vs `package.json`)
+- Optional tag format/version match (`vMAJOR.MINOR.PATCH`)
+- Integration tests (`pytest -q tests/integration`)
+- Python package build (`python -m build`)
+- npm package pack (`npm pack`)
+- Rust adapter release build (`cargo build --release`)
 
-## 建议发布步骤
+Use `--skip-tests` only when CI already ran the same commit:
 
-1. 更新版本号（`pyproject.toml` 与 `package.json`）。
-2. 提交并推送 `main`。
-3. 打 tag 并推送：
-   - `git tag v0.1.0`
-   - `git push origin v0.1.0`
-4. 在 Actions 页面确认 `Release` 工作流完成。
+```bash
+lesscoder release-dry-run --project-root /abs/path/to/less-coder --skip-tests
+```
 
-## 备注
+## CI Release Jobs (`.github/workflows/release.yml`)
 
-- 未配置 `PYPI_API_TOKEN`/`NPM_TOKEN` 时，流水线会跳过对应发布步骤，不会失败。
-- `lesscoder server` 当前仍依赖 Rust 环境；后续可改为下载预编译 adapter 二进制。
+1. Verify integration tests
+2. Build Python distributions
+3. Pack npm tarball
+4. Build Rust adapter binaries (Linux/Windows/macOS)
+   - `alsp_adapter_windows_x86_64.exe`
+   - `alsp_adapter_linux_x86_64`
+   - `alsp_adapter_macos_x86_64`
+   - plus `lesscoder_adapter_manifest.json` (sha256 checksums)
+5. Create GitHub Release for tag events
+6. Publish to PyPI/npm if secrets are configured
+
+## Required Secrets
+
+- `PYPI_API_TOKEN`
+- `NPM_TOKEN`

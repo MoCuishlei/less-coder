@@ -105,12 +105,15 @@ jobs:
           - os: ubuntu-latest
             artifact_name: alsp-adapter-linux
             binary_path: engine/rust/alsp_adapter/target/release/alsp_adapter
+            output_name: alsp_adapter_linux_x86_64
           - os: windows-latest
             artifact_name: alsp-adapter-windows
             binary_path: engine/rust/alsp_adapter/target/release/alsp_adapter.exe
+            output_name: alsp_adapter_windows_x86_64.exe
           - os: macos-latest
             artifact_name: alsp-adapter-macos
             binary_path: engine/rust/alsp_adapter/target/release/alsp_adapter
+            output_name: alsp_adapter_macos_x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -123,11 +126,27 @@ jobs:
         run: |
           cargo build --release --manifest-path engine/rust/alsp_adapter/Cargo.toml --bin alsp_adapter
 
+      - name: Prepare adapter asset (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p release-assets
+          cp "${{ matrix.binary_path }}" "release-assets/${{ matrix.output_name }}"
+          sha256sum "release-assets/${{ matrix.output_name }}" > "release-assets/${{ matrix.output_name }}.sha256"
+
+      - name: Prepare adapter asset (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release-assets | Out-Null
+          Copy-Item "${{ matrix.binary_path }}" "release-assets/${{ matrix.output_name }}"
+          $hash = (Get-FileHash "release-assets/${{ matrix.output_name }}" -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.output_name }}" | Out-File -FilePath "release-assets/${{ matrix.output_name }}.sha256" -Encoding ascii
+
       - name: Upload adapter artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.binary_path }}
+          path: release-assets/*
 
   github-release:
     needs:
@@ -141,6 +160,45 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: release-assets
+
+      - name: Generate adapter manifest
+        run: |
+          python - <<'PY'
+          import hashlib, json
+          from pathlib import Path
+
+          root = Path("release-assets")
+          targets = {
+              "alsp_adapter_windows_x86_64.exe",
+              "alsp_adapter_linux_x86_64",
+              "alsp_adapter_macos_x86_64",
+          }
+          assets = []
+          for p in root.rglob("*"):
+              if not p.is_file():
+                  continue
+              if p.name not in targets:
+                  continue
+              h = hashlib.sha256()
+              with p.open("rb") as f:
+                  while True:
+                      b = f.read(8192)
+                      if not b:
+                          break
+                      h.update(b)
+              assets.append({
+                  "name": p.name,
+                  "sha256": h.hexdigest(),
+                  "size": p.stat().st_size,
+              })
+          manifest = {
+              "version": 1,
+              "assets": sorted(assets, key=lambda x: x["name"]),
+          }
+          out = root / "lesscoder_adapter_manifest.json"
+          out.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+          print(out)
+          PY
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

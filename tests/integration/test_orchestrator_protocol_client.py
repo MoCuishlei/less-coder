@@ -1,7 +1,9 @@
 import asyncio
 import json
 
-from orchestrator.langgraph_orchestrator import LocalProtocolClient
+import pytest
+
+from orchestrator.langgraph_orchestrator import LocalProtocolClient, ProtocolClientError
 
 
 async def _run_mock_server():
@@ -38,7 +40,7 @@ def test_protocol_client_request_response():
         try:
             resp = await client.request(
                 action="symbol.lookup",
-                payload={"symbol": "A#foo"},
+                payload={"symbol": "A#foo", "path": "."},
                 trace_id="tr_test_001",
                 timeout_ms=3000,
             )
@@ -46,6 +48,26 @@ def test_protocol_client_request_response():
             assert resp["trace_id"] == "tr_test_001"
             assert resp["data"]["action"] == "symbol.lookup"
             assert seen_actions == ["system.warmup", "symbol.lookup"]
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(run_case())
+
+
+def test_protocol_client_requires_explicit_warmup_path():
+    async def run_case():
+        server, port, _ = await _run_mock_server()
+        client = LocalProtocolClient(port=port)
+        try:
+            with pytest.raises(ProtocolClientError) as exc:
+                await client.request(
+                    action="symbol.lookup",
+                    payload={"symbol": "A#foo"},
+                    trace_id="tr_test_002",
+                    timeout_ms=3000,
+                )
+            assert "explicit project_root/path" in str(exc.value)
         finally:
             server.close()
             await server.wait_closed()

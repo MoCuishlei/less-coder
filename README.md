@@ -38,16 +38,27 @@ pip install -e .
 
 The npm package is a CLI wrapper that invokes the Python runtime.
 
+`lesscoder server` runtime mode:
+- Dev mode: if local Rust manifest exists, use `cargo run`.
+- Installed mode: if no manifest, resolve adapter binary from:
+  - `LESSCODER_ADAPTER_BIN`
+  - bundled binary (if packaged)
+  - local cache `~/.lesscoder/adapter/...`
+  - GitHub Release auto-download (default repo: `MoCuishlei/less-coder`)
+  - checksum verify via `lesscoder_adapter_manifest.json` when available
+
 ## Run
 
 ```bash
-lesscoder warmup
+lesscoder warmup --project-root /abs/path/to/your/repo
 lesscoder server --host 127.0.0.1 --port 8787
-lesscoder run --project-root fixtures/java-sample
+lesscoder run --project-root /abs/path/to/your/repo
 lesscoder trace --trace-id <trace_id>
+lesscoder release-dry-run --project-root /abs/path/to/your/repo --tag v0.1.0
 ```
 
-`lesscoder server` performs internal warmup automatically before serving.
+`warmup` requires explicit path parameters (`--project-root` or `--manifest-path`).
+`server` can start without project path, then accept `system.warmup(project_root=...)` later.
 
 ## MCP Setup
 
@@ -57,6 +68,12 @@ Start the service first:
 lesscoder server --host 127.0.0.1 --port 8787
 ```
 
+When server starts, it prints:
+- a ready-to-copy MCP config JSON snippet
+- HTTP inspect endpoints:
+  - `http://127.0.0.1:8787/health`
+  - `http://127.0.0.1:8787/methods`
+
 Then configure your MCP client to launch `lesscoder` as a local server process.
 Example config (common `mcpServers` format):
 
@@ -65,10 +82,7 @@ Example config (common `mcpServers` format):
   "mcpServers": {
     "lesscoder": {
       "command": "lesscoder",
-      "args": ["server", "--host", "127.0.0.1", "--port", "8787"],
-      "env": {
-        "LESSCODER_HOME": "/absolute/path/to/less-coder"
-      }
+      "args": ["server", "--host", "127.0.0.1", "--port", "8787"]
     }
   }
 }
@@ -76,9 +90,11 @@ Example config (common `mcpServers` format):
 
 Notes:
 
-- Use `LESSCODER_HOME` when the client may start from an arbitrary working directory.
+- project activation is explicit via `system.warmup` payload (`project_root`/`path`).
 - If port `8787` is already occupied, change it in both server args and client settings.
 - Current adapter endpoint is `127.0.0.1:<port>` with local protocol v0.
+- Browser inspection endpoints are best-effort diagnostics; MCP calls still use local protocol v0.
+- You can override adapter binary path with `LESSCODER_ADAPTER_BIN`.
 
 ## Quick Validation
 

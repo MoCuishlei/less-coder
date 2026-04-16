@@ -1,9 +1,18 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+
+static WARMED_UP: AtomicBool = AtomicBool::new(false);
+static WARMUP_SNAPSHOTS: LazyLock<Mutex<HashMap<String, HashMap<String, u64>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Deserialize)]
 struct RequestEnvelope {
@@ -70,6 +79,27 @@ async fn handle_connection(socket: TcpStream) -> Result<()> {
             continue;
         }
 
+        if line.starts_with("GET ") {
+            while let Some(header_line) = lines.next_line().await? {
+                if header_line.trim().is_empty() {
+                    break;
+                }
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or("/");
+            let (status_code, body) = http_response_body(path);
+            let reason = if status_code == 200 { "OK" } else { "Not Found" };
+            let resp = format!(
+                "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status_code,
+                reason,
+                body.as_bytes().len(),
+                body
+            );
+            writer.write_all(resp.as_bytes()).await?;
+            writer.flush().await?;
+            return Ok(());
+        }
+
         let response = match serde_json::from_str::<RequestEnvelope>(&line) {
             Ok(req) => handle_request(req),
             Err(err) => ResponseEnvelope {
@@ -99,6 +129,40 @@ async fn handle_connection(socket: TcpStream) -> Result<()> {
     Ok(())
 }
 
+fn http_response_body(path: &str) -> (u16, String) {
+    let normalized_path = path.split('?').next().unwrap_or(path);
+    let body = match normalized_path {
+        "/health" => json!({
+            "status": "ok",
+            "service": "lesscoder-alsp-adapter",
+            "protocol_version": "v0",
+            "warmed_up": WARMED_UP.load(Ordering::SeqCst),
+        }),
+        "/methods" => {
+            let health = system_health_payload();
+            json!({
+                "status": "ok",
+                "methods": health.get("methods").cloned().unwrap_or(json!([])),
+                "summary": health.get("summary").cloned().unwrap_or(json!({})),
+                "warmed_up": health.get("warmed_up").cloned().unwrap_or(json!(false)),
+            })
+        }
+        _ => {
+            return (
+                404,
+                json!({
+                    "status": "error",
+                    "error_code": "HTTP_NOT_FOUND",
+                    "message": "endpoint not found",
+                    "available": ["/health", "/methods"]
+                })
+                .to_string(),
+            )
+        }
+    };
+    (200, body.to_string())
+}
+
 fn handle_request(req: RequestEnvelope) -> ResponseEnvelope {
     if req.version != "v0" {
         return ResponseEnvelope {
@@ -124,14 +188,50 @@ fn handle_request(req: RequestEnvelope) -> ResponseEnvelope {
 
 fn route_action(req: RequestEnvelope) -> ResponseEnvelope {
     match req.action.as_str() {
-        "system.warmup" => ok_response(
-            req,
-            json!({
-                "status": "ready",
-                "adapter": "alsp_adapter",
-                "message": "internal warmup completed"
-            }),
-        ),
+        "system.health" => ok_response(req, system_health_payload()),
+        "system.warmup" => {
+            let started = Instant::now();
+            let project_root = match extract_root_path(&req.payload) {
+                Some(v) => v,
+                None => {
+                    return error_response(
+                        req,
+                        "COMMON_BAD_REQUEST",
+                        "system.warmup requires explicit project_root/path",
+                        false,
+                        "Adapter",
+                        json!({
+                            "required": ["project_root|path"],
+                            "example": {
+                                "action": "system.warmup",
+                                "payload": {"project_root": "<project-root>"}
+                            }
+                        }),
+                    )
+                }
+            };
+            let warmup_result = compute_incremental_warmup(PathBuf::from(&project_root));
+            WARMED_UP.store(true, Ordering::SeqCst);
+            match warmup_result {
+                Ok((changed_files, reindexed_files)) => ok_response(
+                    req,
+                    json!({
+                        "status": "ready",
+                        "adapter": "alsp_adapter",
+                        "message": "internal warmup completed",
+                        "project_root": project_root,
+                        "changed_files": changed_files,
+                        "reindexed_files": reindexed_files,
+                        "duration_ms": started.elapsed().as_millis(),
+                    }),
+                ),
+                Err(err) => internal_error_response(
+                    req,
+                    "COMMON_INTERNAL",
+                    format!("system.warmup failed: {err}"),
+                ),
+            }
+        }
         "repo.map" => {
             let root = extract_root_path(&req.payload).unwrap_or_else(|| ".".to_string());
             let root_path = PathBuf::from(&root);
@@ -140,7 +240,11 @@ fn route_action(req: RequestEnvelope) -> ResponseEnvelope {
                 Err(err) => internal_error_response(req, "COMMON_INTERNAL", format!("repo.map failed: {err}")),
             }
         }
-        "symbol.lookup" | "symbol.lookup.static" => {
+        "symbol.lookup" | "symbol.lookup.static" | "symbol.resolve" => {
+            if !WARMED_UP.load(Ordering::SeqCst) {
+                let action = req.action.clone();
+                return precondition_required_response(req, action.as_str());
+            }
             let root = extract_root_path(&req.payload).unwrap_or_else(|| ".".to_string());
             let symbol = req.payload.get("symbol").and_then(|v| v.as_str()).map(|s| s.to_string());
             let Some(symbol) = symbol else {
@@ -174,6 +278,25 @@ fn route_action(req: RequestEnvelope) -> ResponseEnvelope {
                 ),
                 Err(err) => internal_error_response(req, "COMMON_INTERNAL", format!("symbol.lookup failed: {err}")),
             }
+        }
+        "graph.calls" => {
+            if !WARMED_UP.load(Ordering::SeqCst) {
+                return precondition_required_response(req, "graph.calls");
+            }
+            let symbol = req.payload.get("symbol").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let Some(symbol) = symbol else {
+                return bad_request_response(req, "missing payload.symbol");
+            };
+            let depth = req.payload.get("depth").and_then(|v| v.as_u64()).unwrap_or(1);
+            ok_response(
+                req,
+                json!({
+                    "symbol": symbol,
+                    "depth": depth,
+                    "calls": [],
+                    "provider": "alsp.graph.calls.v0"
+                }),
+            )
         }
         "patch.apply" => {
             let target = req
@@ -250,6 +373,84 @@ fn route_action(req: RequestEnvelope) -> ResponseEnvelope {
     }
 }
 
+fn system_health_payload() -> Value {
+    let methods = vec![
+        json!({
+            "action": "system.health",
+            "category": "system",
+            "requires_warmup": false,
+            "available": true,
+            "description": "service health and capability listing",
+        }),
+        json!({
+            "action": "system.warmup",
+            "category": "system",
+            "requires_warmup": false,
+            "available": true,
+            "description": "preheat runtime and semantic index",
+        }),
+        json!({
+            "action": "repo.map",
+            "category": "context",
+            "requires_warmup": false,
+            "available": true,
+            "description": "repository skeleton map",
+        }),
+        json!({
+            "action": "symbol.lookup",
+            "category": "context",
+            "requires_warmup": true,
+            "available": true,
+            "description": "symbol resolution (LSP preferred)",
+        }),
+        json!({
+            "action": "symbol.lookup.static",
+            "category": "context",
+            "requires_warmup": true,
+            "available": true,
+            "description": "symbol resolution from static index",
+        }),
+        json!({
+            "action": "symbol.resolve",
+            "category": "context",
+            "requires_warmup": true,
+            "available": true,
+            "description": "canonical symbol resolve alias",
+        }),
+        json!({
+            "action": "patch.apply",
+            "category": "edit",
+            "requires_warmup": false,
+            "available": true,
+            "description": "apply search/replace patch",
+        }),
+        json!({
+            "action": "graph.calls",
+            "category": "graph",
+            "requires_warmup": true,
+            "available": true,
+            "description": "call graph query",
+        }),
+    ];
+
+    let requires_warmup_count = methods
+        .iter()
+        .filter(|m| m.get("requires_warmup").and_then(|v| v.as_bool()).unwrap_or(false))
+        .count();
+
+    json!({
+        "status": "ok",
+        "service": "lesscoder-alsp-adapter",
+        "protocol_version": "v0",
+        "warmed_up": WARMED_UP.load(Ordering::SeqCst),
+        "methods": methods,
+        "summary": {
+            "total_methods": 8,
+            "requires_warmup_methods": requires_warmup_count,
+        }
+    })
+}
+
 fn extract_root_path(payload: &Value) -> Option<String> {
     payload
         .get("path")
@@ -261,6 +462,96 @@ fn extract_root_path(payload: &Value) -> Option<String> {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
         })
+}
+
+fn compute_incremental_warmup(project_root: PathBuf) -> Result<(Vec<String>, usize), String> {
+    let snapshot = collect_java_file_mtimes(&project_root)?;
+    let root_key = project_root.to_string_lossy().to_string();
+
+    let mut guard = WARMUP_SNAPSHOTS
+        .lock()
+        .map_err(|_| "warmup snapshot lock poisoned".to_string())?;
+    let previous = guard.get(&root_key);
+
+    let changed_files = diff_changed_files(previous, &snapshot);
+    let reindexed_files = changed_files.len();
+
+    guard.insert(root_key, snapshot);
+    Ok((changed_files, reindexed_files))
+}
+
+fn collect_java_file_mtimes(root: &PathBuf) -> Result<HashMap<String, u64>, String> {
+    let mut out = HashMap::new();
+    if !root.exists() {
+        return Ok(out);
+    }
+    collect_java_file_mtimes_recursive(root, &mut out)?;
+    Ok(out)
+}
+
+fn collect_java_file_mtimes_recursive(
+    dir: &PathBuf,
+    out: &mut HashMap<String, u64>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("read_dir failed for {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read_dir entry failed: {e}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_java_file_mtimes_recursive(&path, out)?;
+            continue;
+        }
+        let is_java = path
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x.eq_ignore_ascii_case("java"))
+            .unwrap_or(false);
+        if !is_java {
+            continue;
+        }
+        let modified_secs = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or_else(current_unix_secs);
+        out.insert(path.to_string_lossy().to_string(), modified_secs);
+    }
+    Ok(())
+}
+
+fn diff_changed_files(
+    previous: Option<&HashMap<String, u64>>,
+    current: &HashMap<String, u64>,
+) -> Vec<String> {
+    let mut changed: Vec<String> = Vec::new();
+    match previous {
+        None => {
+            changed.extend(current.keys().cloned());
+        }
+        Some(prev) => {
+            for (path, ts) in current {
+                if prev.get(path) != Some(ts) {
+                    changed.push(path.clone());
+                }
+            }
+            for path in prev.keys() {
+                if !current.contains_key(path) {
+                    changed.push(path.clone());
+                }
+            }
+        }
+    }
+    changed.sort();
+    changed
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn ok_response(req: RequestEnvelope, data: Value) -> ResponseEnvelope {
@@ -314,5 +605,260 @@ fn error_response(
         }),
         fallback_used: false,
         cost: json!({ "duration_ms": 0 }),
+    }
+}
+
+fn precondition_required_response(req: RequestEnvelope, action: &str) -> ResponseEnvelope {
+    error_response(
+        req,
+        "COMMON_PRECONDITION_REQUIRED",
+        "method requires warmup before use",
+        false,
+        "Adapter",
+        json!({
+            "action": action,
+            "next_action": "system.warmup",
+            "example": {
+                "action": "system.warmup",
+                "payload": {"project_root": "<project-root>"}
+            }
+        }),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn req(action: &str) -> RequestEnvelope {
+        RequestEnvelope {
+            version: "v0".to_string(),
+            request_id: "req_001".to_string(),
+            trace_id: "tr_001".to_string(),
+            session_id: None,
+            source: "test".to_string(),
+            target: "adapter".to_string(),
+            action: action.to_string(),
+            payload: json!({}),
+            meta: None,
+        }
+    }
+
+    fn clear_warmup_snapshots() {
+        if let Ok(mut guard) = WARMUP_SNAPSHOTS.lock() {
+            guard.clear();
+        }
+    }
+
+    #[test]
+    fn system_health_returns_method_catalog_with_warmup_flags() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
+        WARMED_UP.store(false, Ordering::SeqCst);
+        clear_warmup_snapshots();
+        let resp = route_action(req("system.health"));
+        assert_eq!(resp.status, "ok");
+        let data = resp.data.expect("system.health should return data");
+        let methods = data
+            .get("methods")
+            .and_then(|v| v.as_array())
+            .expect("methods must be array");
+        assert!(!methods.is_empty());
+        let symbol_lookup = methods
+            .iter()
+            .find(|m| m.get("action") == Some(&json!("symbol.lookup")))
+            .expect("symbol.lookup method missing");
+        assert_eq!(
+            symbol_lookup
+                .get("requires_warmup")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            true
+        );
+        let patch_apply = methods
+            .iter()
+            .find(|m| m.get("action") == Some(&json!("patch.apply")))
+            .expect("patch.apply method missing");
+        assert_eq!(
+            patch_apply
+                .get("requires_warmup")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            false
+        );
+    }
+
+    #[test]
+    fn symbol_lookup_requires_warmup_before_use() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
+        WARMED_UP.store(false, Ordering::SeqCst);
+        clear_warmup_snapshots();
+        let mut lookup_req = req("symbol.lookup");
+        lookup_req.payload = json!({
+            "path": ".",
+            "symbol": "normalizeName"
+        });
+        let resp = route_action(lookup_req);
+        assert_eq!(resp.status, "error");
+        let err = resp.error.expect("error body expected");
+        assert_eq!(err.code, "COMMON_PRECONDITION_REQUIRED");
+        assert_eq!(
+            err.details.get("next_action").and_then(|v| v.as_str()),
+            Some("system.warmup")
+        );
+    }
+
+    #[test]
+    fn symbol_lookup_after_warmup_is_not_blocked_by_precondition() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
+        WARMED_UP.store(false, Ordering::SeqCst);
+        clear_warmup_snapshots();
+        let mut warmup_req = req("system.warmup");
+        warmup_req.payload = json!({"project_root": "."});
+        let warmup_resp = route_action(warmup_req);
+        assert_eq!(warmup_resp.status, "ok");
+
+        let mut lookup_req = req("symbol.lookup");
+        lookup_req.payload = json!({
+            "path": ".",
+            "symbol": "normalizeName"
+        });
+        let resp = route_action(lookup_req);
+        assert!(
+            resp.error
+                .as_ref()
+                .map(|e| e.code.as_str())
+                != Some("COMMON_PRECONDITION_REQUIRED")
+        );
+    }
+
+    #[test]
+    fn graph_calls_requires_warmup_before_use() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
+        WARMED_UP.store(false, Ordering::SeqCst);
+        clear_warmup_snapshots();
+        let mut req_graph = req("graph.calls");
+        req_graph.payload = json!({"symbol": "normalizeName"});
+        let resp = route_action(req_graph);
+        assert_eq!(resp.status, "error");
+        let err = resp.error.expect("error body expected");
+        assert_eq!(err.code, "COMMON_PRECONDITION_REQUIRED");
+    }
+
+    #[test]
+    fn graph_calls_after_warmup_returns_ok_shape() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
+        WARMED_UP.store(false, Ordering::SeqCst);
+        clear_warmup_snapshots();
+        let mut warmup_req = req("system.warmup");
+        warmup_req.payload = json!({"project_root": "."});
+        let warmup_resp = route_action(warmup_req);
+        assert_eq!(warmup_resp.status, "ok");
+
+        let mut req_graph = req("graph.calls");
+        req_graph.payload = json!({"symbol": "normalizeName", "depth": 2});
+        let resp = route_action(req_graph);
+        assert_eq!(resp.status, "ok");
+        let data = resp.data.expect("graph.calls data expected");
+        assert_eq!(data.get("provider").and_then(|v| v.as_str()), Some("alsp.graph.calls.v0"));
+    }
+
+    #[test]
+    fn warmup_incremental_reports_only_changed_java_files() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
+        WARMED_UP.store(false, Ordering::SeqCst);
+        clear_warmup_snapshots();
+
+        let root = std::env::temp_dir().join(format!(
+            "lesscoder_warmup_test_{}",
+            current_unix_secs()
+        ));
+        fs::create_dir_all(&root).expect("create temp root");
+        let java_file = root.join("A.java");
+        let mut f = fs::File::create(&java_file).expect("create java file");
+        writeln!(f, "class A {{}}").expect("write initial java file");
+
+        let mut warmup_1 = req("system.warmup");
+        warmup_1.payload = json!({"project_root": root.to_string_lossy().to_string()});
+        let resp1 = route_action(warmup_1);
+        assert_eq!(resp1.status, "ok");
+        let data1 = resp1.data.expect("warmup data expected");
+        let changed_1 = data1
+            .get("changed_files")
+            .and_then(|v| v.as_array())
+            .expect("changed_files must be array");
+        assert!(!changed_1.is_empty());
+
+        let mut warmup_2 = req("system.warmup");
+        warmup_2.payload = json!({"project_root": root.to_string_lossy().to_string()});
+        let resp2 = route_action(warmup_2);
+        assert_eq!(resp2.status, "ok");
+        let data2 = resp2.data.expect("warmup data expected");
+        let changed_2 = data2
+            .get("changed_files")
+            .and_then(|v| v.as_array())
+            .expect("changed_files must be array");
+        assert!(changed_2.is_empty());
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let mut f2 = fs::File::create(&java_file).expect("reopen java file");
+        writeln!(f2, "class A {{ int x = 1; }}").expect("rewrite java file");
+
+        let mut warmup_3 = req("system.warmup");
+        warmup_3.payload = json!({"project_root": root.to_string_lossy().to_string()});
+        let resp3 = route_action(warmup_3);
+        assert_eq!(resp3.status, "ok");
+        let data3 = resp3.data.expect("warmup data expected");
+        let changed_3 = data3
+            .get("changed_files")
+            .and_then(|v| v.as_array())
+            .expect("changed_files must be array");
+        assert_eq!(changed_3.len(), 1);
+        assert_eq!(
+            data3
+                .get("reindexed_files")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            1
+        );
+
+        let _ = fs::remove_file(&java_file);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn http_health_endpoint_returns_ok() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
+        let (status, body) = http_response_body("/health");
+        assert_eq!(status, 200);
+        let payload: Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(payload.get("status").and_then(|v| v.as_str()), Some("ok"));
+    }
+
+    #[test]
+    fn http_methods_endpoint_returns_method_list() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
+        let (status, body) = http_response_body("/methods");
+        assert_eq!(status, 200);
+        let payload: Value = serde_json::from_str(&body).expect("valid json");
+        assert!(payload
+            .get("methods")
+            .and_then(|v| v.as_array())
+            .is_some_and(|arr| !arr.is_empty()));
+    }
+
+    #[test]
+    fn http_unknown_endpoint_returns_404() {
+        let _guard = TEST_LOCK.lock().expect("test lock poisoned");
+        let (status, body) = http_response_body("/unknown");
+        assert_eq!(status, 404);
+        let payload: Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(
+            payload.get("error_code").and_then(|v| v.as_str()),
+            Some("HTTP_NOT_FOUND")
+        );
     }
 }
