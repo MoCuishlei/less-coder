@@ -261,7 +261,12 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          npm publish npm-dist/*.tgz --access public
+          TARBALL=$(ls ./npm-dist/*.tgz | head -n 1)
+          if [ -z "$TARBALL" ]; then
+            echo "No npm tarball found under ./npm-dist"
+            exit 1
+          fi
+          npm publish "$TARBALL" --access public
 
       - name: Skip npm publish (missing secret)
         if: ${{ env.HAS_NPM_TOKEN != 'true' }}
