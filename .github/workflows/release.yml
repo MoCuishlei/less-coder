@@ -360,8 +360,8 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          ADAPTER_TARBALL=$(ls ./npm-dist/*lesscoder-adapter-win32-x64*.tgz | head -n 1)
-          MAIN_TARBALL=$(ls ./npm-dist/*lesscoder*.tgz | grep -v lesscoder-adapter-win32-x64 | head -n 1)
+          ADAPTER_TARBALL=$(find ./npm-dist -type f -name "*lesscoder-adapter-win32-x64*.tgz" | head -n 1)
+          MAIN_TARBALL=$(find ./npm-dist -type f -name "*lesscoder*.tgz" | grep -v "lesscoder-adapter-win32-x64" | head -n 1)
           if [ -z "$ADAPTER_TARBALL" ]; then
             echo "Adapter npm tarball not found under ./npm-dist"
             exit 1
